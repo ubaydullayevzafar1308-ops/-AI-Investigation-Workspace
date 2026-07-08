@@ -25,13 +25,15 @@ public class LlmService {
     private final LlmResponseCache cache;
     private final AuditService audit;
     private final LlmProperties properties;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
 
-    public LlmService(LlmAdapter adapter, LlmResponseCache cache, AuditService audit, LlmProperties properties) {
+    public LlmService(LlmAdapter adapter, LlmResponseCache cache, AuditService audit, LlmProperties properties,
+                       ObjectMapper objectMapper) {
         this.adapter = adapter;
         this.cache = cache;
         this.audit = audit;
         this.properties = properties;
+        this.objectMapper = objectMapper;
     }
 
     /** explainRisk — используется автоматически при сборке кейса (Case Builder). */
