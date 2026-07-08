@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: case_intelligence
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app_secret
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+
+  backend:
+    build: ./backend
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/case_intelligence
+      SPRING_DATASOURCE_USERNAME: app
+      SPRING_DATASOURCE_PASSWORD: app_secret
+      LLM_PROVIDER: ${LLM_PROVIDER:-claude}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_CACHE_ENABLED: "true"
+    depends_on: [db]
+    ports: ["8080:8080"]
+
+  frontend:
+    build: ./frontend
+    depends_on: [backend]
+    ports: ["5173:5173"]
+
+volumes:
+  pgdata:
