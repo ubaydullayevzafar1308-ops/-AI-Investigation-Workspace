@@ -125,7 +125,8 @@ class R01StructuringRuleTest {
                 transactions,
                 List.of(),
                 List.of(),
-                List.of()
+                List.of(),
+                List.of()  // moneyCycles
         );
     }
 }

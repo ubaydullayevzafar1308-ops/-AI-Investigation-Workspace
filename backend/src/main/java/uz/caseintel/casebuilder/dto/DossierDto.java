@@ -43,7 +43,19 @@ public record DossierDto(
         List<CompanyView> relatedCompanies,
 
         /** Прошлые алерты этого клиента — основа "repeat offender" усилителя в Risk Engine. */
-        List<PastAlertView> pastAlerts
+        List<PastAlertView> pastAlerts,
+
+        /**
+         * Круговые денежные схемы (A -> B -> C -> A), найденные CycleDetector'ом
+         * ДО запуска Rule Engine. Технически цикл — это уже результат Graph
+         * Engine (③), который в общей схеме пайплайна идёт ПОСЛЕ Rule Engine (②);
+         * но R03 (Circular flow) логически принадлежит списку правил, поэтому
+         * Data Collector (①) прогоняет CycleDetector заранее и кладёт готовый
+         * результат сюда — R03 остаётся чистой функцией DossierDto -> Optional,
+         * как и все остальные правила, не завися от порядка вызова сервисов.
+         * Пусто, если циклов не найдено.
+         */
+        List<CycleView> moneyCycles
 ) {
 
     /**
@@ -78,7 +90,15 @@ public record DossierDto(
             String name,
             LocalDate registrationDate,
             boolean blacklisted,
-            String roleOfClient        // "director" | "founder"
+            String roleOfClient,       // "director" | "founder"
+            /**
+             * Оборот по счетам компании за весь период, доступный в досье
+             * (сумма amount по транзакциям, где participant — счёт этой
+             * компании). Data Collector считает это агрегатом при сборке —
+             * правилу R04 не нужно видеть сырые транзакции компании,
+             * только уже посчитанный итог.
+             */
+            BigDecimal turnoverAmount
     ) {}
 
     public record PastAlertView(
@@ -86,5 +106,17 @@ public record DossierDto(
             Long caseId,               // null, если по алерту кейс ещё не заводился
             String status,             // Case.STATUS_* если caseId не null
             OffsetDateTime createdAt
+    ) {}
+
+    /**
+     * Один найденный цикл денежного потока: путь по субъектам
+     * ("К-1 → OOO Barakat → OOO Vega → К-1") и суммарный оборот по циклу.
+     * pathLabels — отображаемые метки узлов в порядке обхода (замкнутый
+     * путь: последний элемент логически равен первому).
+     */
+    public record CycleView(
+            List<String> pathLabels,
+            BigDecimal totalAmount,
+            int transactionCount
     ) {}
 }
