@@ -9,6 +9,7 @@ import uz.caseintel.evidence.EvidenceBundle;
 import uz.caseintel.explainability.ExplanationDto;
 import uz.caseintel.repository.CaseRepository;
 import org.springframework.http.HttpStatus;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -21,9 +22,15 @@ import org.springframework.web.server.ResponseStatusException;
  * GET /api/cases, GET /api/cases/{id}, GET /api/cases/{id}/evidence,
  * GET /api/cases/{id}/explanation, PATCH /api/cases/{id}/decision.
  * См. ARCHITECTURE.md §14.
+ *
+ * Возвращает CaseSummaryDto, а не саму Case entity — см. javadoc
+ * CaseSummaryDto для причин (LAZY-связи + сырые JSON-строки в колонках).
+ * @Transactional нужен, чтобы getAlert()/getClient() внутри from()
+ * не бросали LazyInitializationException вне сессии Hibernate.
  */
 @RestController
 @RequestMapping("/api/cases")
+@Transactional(readOnly = true)
 public class CaseController {
 
     private final CaseRepository caseRepository;
@@ -37,14 +44,14 @@ public class CaseController {
     }
 
     @GetMapping
-    public List<Case> list() {
-        return caseRepository.findAll();
+    public List<CaseSummaryDto> list() {
+        return caseRepository.findAll().stream().map(CaseSummaryDto::from).toList();
     }
 
-    /** Полное досье: dossier + evidence + explanation — снапшоты из момента сборки кейса. */
+    /** Сводка по кейсу; полные dossier/evidence/explanation — через отдельные эндпоинты ниже. */
     @GetMapping("/{id}")
-    public Case get(@PathVariable Long id) {
-        return findOrThrow(id);
+    public CaseSummaryDto get(@PathVariable Long id) {
+        return CaseSummaryDto.from(findOrThrow(id));
     }
 
     @GetMapping("/{id}/evidence")
@@ -66,7 +73,8 @@ public class CaseController {
      * Записывает решение и пишет в Audit Log (см. AuditService.logDecision).
      */
     @PatchMapping("/{id}/decision")
-    public Case decide(@PathVariable Long id, @RequestBody DecisionRequest request) {
+    @Transactional
+    public CaseSummaryDto decide(@PathVariable Long id, @RequestBody DecisionRequest request) {
         Case c = findOrThrow(id);
         c.setStatus(request.status());
         c.setAnalystDecision(request.comment());
@@ -77,7 +85,7 @@ public class CaseController {
         // ещё нет в системе) — placeholder "analyst" до появления авторизации.
         audit.logDecision(saved, "analyst");
 
-        return saved;
+        return CaseSummaryDto.from(saved);
     }
 
     private Case findOrThrow(Long id) {
