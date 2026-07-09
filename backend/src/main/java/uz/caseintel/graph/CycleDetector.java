@@ -56,20 +56,36 @@ public class CycleDetector {
      * набору рёбер) возвращается один раз.
      */
     public List<CycleView> findCyclesFrom(String startNodeId) {
+        return search(startNodeId).cycles();
+    }
+
+    /**
+     * Рёбра, входящие хотя бы в один найденный цикл, — GraphEngineService
+     * помечает их suspicious=true, чтобы фронт подсветил круговую схему.
+     */
+    public Set<MoneyEdge> findCycleEdgesFrom(String startNodeId) {
+        return search(startNodeId).cycleEdges();
+    }
+
+    private record SearchResult(List<CycleView> cycles, Set<MoneyEdge> cycleEdges) {}
+
+    private SearchResult search(String startNodeId) {
         List<CycleView> result = new ArrayList<>();
+        Set<MoneyEdge> cycleEdges = new HashSet<>();
         Set<String> seenCycleKeys = new HashSet<>();
 
         Deque<String> path = new ArrayDeque<>();
         Deque<MoneyEdge> pathEdges = new ArrayDeque<>();
         path.addLast(startNodeId);
 
-        dfs(startNodeId, startNodeId, path, pathEdges, new HashSet<>(List.of(startNodeId)), result, seenCycleKeys);
+        dfs(startNodeId, startNodeId, path, pathEdges, new HashSet<>(List.of(startNodeId)), result, seenCycleKeys, cycleEdges);
 
-        return result;
+        return new SearchResult(result, cycleEdges);
     }
 
     private void dfs(String start, String current, Deque<String> path, Deque<MoneyEdge> pathEdges,
-                      Set<String> visited, List<CycleView> result, Set<String> seenCycleKeys) {
+                      Set<String> visited, List<CycleView> result, Set<String> seenCycleKeys,
+                      Set<MoneyEdge> cycleEdges) {
         if (path.size() > MAX_DEPTH) {
             return;
         }
@@ -79,7 +95,7 @@ public class CycleDetector {
 
             if (next.equals(start) && path.size() >= MIN_CYCLE_LENGTH) {
                 pathEdges.addLast(edge);
-                recordCycle(path, pathEdges, seenCycleKeys, result);
+                recordCycle(path, pathEdges, seenCycleKeys, result, cycleEdges);
                 pathEdges.removeLast();
                 continue;
             }
@@ -91,7 +107,7 @@ public class CycleDetector {
             path.addLast(next);
             pathEdges.addLast(edge);
 
-            dfs(start, next, path, pathEdges, visited, result, seenCycleKeys);
+            dfs(start, next, path, pathEdges, visited, result, seenCycleKeys, cycleEdges);
 
             pathEdges.removeLast();
             path.removeLast();
@@ -100,7 +116,8 @@ public class CycleDetector {
     }
 
     private void recordCycle(Deque<String> path, Deque<MoneyEdge> pathEdges,
-                              Set<String> seenCycleKeys, List<CycleView> result) {
+                              Set<String> seenCycleKeys, List<CycleView> result,
+                              Set<MoneyEdge> cycleEdges) {
         List<String> nodeIds = new ArrayList<>(path);
 
         // Ключ цикла — отсортированный набор узлов, чтобы не считать
@@ -109,6 +126,7 @@ public class CycleDetector {
         if (!seenCycleKeys.add(cycleKey)) {
             return;
         }
+        cycleEdges.addAll(pathEdges);
 
         List<String> pathLabels = new ArrayList<>();
         for (String nodeId : nodeIds) {

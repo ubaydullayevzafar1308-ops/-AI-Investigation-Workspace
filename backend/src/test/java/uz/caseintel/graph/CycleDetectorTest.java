@@ -77,4 +77,18 @@ class CycleDetectorTest {
         var detector = new CycleDetector(List.of(), LABELS);
         assertThat(detector.findCyclesFrom("client_1")).isEmpty();
     }
+
+    @Test
+    void findCycleEdgesFrom_returnsOnlyEdgesOnCycles() {
+        var onCycle1 = new MoneyEdge("client_1", "company_1", new BigDecimal("100000000"), 3);
+        var onCycle2 = new MoneyEdge("company_1", "company_2", new BigDecimal("95000000"), 2);
+        var onCycle3 = new MoneyEdge("company_2", "client_1", new BigDecimal("90000000"), 4);
+        // Побочный поток в сторону — не часть цикла, помечаться не должен.
+        var offCycle = new MoneyEdge("company_1", "company_3", new BigDecimal("500000000"), 1);
+
+        var detector = new CycleDetector(List.of(onCycle1, onCycle2, onCycle3, offCycle), LABELS);
+        var cycleEdges = detector.findCycleEdgesFrom("client_1");
+
+        assertThat(cycleEdges).containsExactlyInAnyOrder(onCycle1, onCycle2, onCycle3);
+    }
 }

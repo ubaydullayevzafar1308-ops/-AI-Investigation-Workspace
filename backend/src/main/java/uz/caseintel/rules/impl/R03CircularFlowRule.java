@@ -2,6 +2,7 @@ package uz.caseintel.rules.impl;
 
 import java.math.BigDecimal;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import uz.caseintel.casebuilder.dto.DossierDto;
@@ -23,9 +24,15 @@ import org.springframework.stereotype.Component;
  * (см. комментарий у поля в DossierDto.java). R03 остаётся чистой
  * функцией: она просто читает уже готовый список циклов и берёт
  * самый крупный по обороту, если он есть.
+ *
+ * Циклы с оборотом <= MIN_CYCLE_TURNOVER игнорируются: мелкие круговые
+ * переводы (взаимные бытовые расчёты внутри семьи/партнёров) — не схема.
  */
 @Component
 public class R03CircularFlowRule implements Rule {
+
+    /** Минимальный суммарный оборот цикла, чтобы считать его схемой (UZS). */
+    static final BigDecimal MIN_CYCLE_TURNOVER = new BigDecimal("100000000");
 
     @Override
     public String code() {
@@ -48,12 +55,19 @@ public class R03CircularFlowRule implements Rule {
             return Optional.empty();
         }
 
-        CycleView biggest = dossier.moneyCycles().stream()
+        List<CycleView> significant = dossier.moneyCycles().stream()
+                .filter(c -> c.totalAmount().compareTo(MIN_CYCLE_TURNOVER) > 0)
+                .toList();
+        if (significant.isEmpty()) {
+            return Optional.empty();
+        }
+
+        CycleView biggest = significant.stream()
                 .max(Comparator.comparing(CycleView::totalAmount))
                 .orElseThrow();
 
         String path = String.join(" → ", biggest.pathLabels());
-        String explanation = "Обнаружена круговая схема переводов: %s, оборот %s (%d операций)."
+        String explanation = "Обнаружена круговая схема переводов: %s, общий оборот %s (%d операций)."
                 .formatted(path, formatAmount(biggest.totalAmount()), biggest.transactionCount());
 
         return Optional.of(new RuleResult(
@@ -62,7 +76,7 @@ public class R03CircularFlowRule implements Rule {
                         "path", biggest.pathLabels(),
                         "total_amount", biggest.totalAmount(),
                         "transaction_count", biggest.transactionCount(),
-                        "cycles_found", dossier.moneyCycles().size()
+                        "cycles_found", significant.size()
                 ),
                 explanation
         ));

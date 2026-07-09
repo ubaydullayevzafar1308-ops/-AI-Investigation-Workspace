@@ -21,16 +21,26 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * Два независимых источника рёбер:
  *  - relation-рёбра — из таблицы relationships (структурные связи);
- *  - money_flow-рёбра — агрегат по transactions между парой субъектов,
- *    построенный отдельным SQL-запросом (не CTE — сумма по счетам,
- *    а не по relationships).
+ *  - money_flow-рёбра — направленные агрегаты по transactions между
+ *    ВСЕМИ парами участников подграфа (buildMoneyFlowGraph), а не только
+ *    прямые потоки клиента — иначе рёбра цикла между двумя компаниями
+ *    (A → B в схеме client → A → B → client) не попадали бы в граф и
+ *    круговая схема была бы не видна на фронте.
  * Собираются в общий GraphDto одним проходом, без дедупликации между
  * видами (см. комментарий в GraphDto).
+ *
+ * Рёбра, входящие в найденный CycleDetector'ом цикл через клиента,
+ * помечаются suspicious=true независимо от эвристики по сумме/числу
+ * операций — фронт подсвечивает всю круговую схему целиком.
  */
 @Service
 public class GraphEngineService {
 
     private static final int MAX_DEPTH = 2;
+
+    /** Эвристика подсветки money_flow-ребра: крупная сумма ИЛИ много операций. */
+    private static final BigDecimal SUSPICIOUS_TOTAL = new BigDecimal("300000000");
+    private static final int SUSPICIOUS_TX_COUNT = 10;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -56,7 +66,11 @@ public class GraphEngineService {
     @Transactional(readOnly = true)
     public GraphDto build(Long clientId) {
         List<Tuple> relationRows = fetchRelationSubgraph(clientId);
-        List<Tuple> moneyFlowRows = fetchMoneyFlowEdges(clientId);
+        MoneyFlowGraph moneyFlow = buildMoneyFlowGraph(clientId);
+
+        // Рёбра, лежащие на круговых схемах через клиента, — подсвечиваются целиком.
+        var detector = new CycleDetector(moneyFlow.edges(), moneyFlow.labels());
+        Set<CycleDetector.MoneyEdge> cycleEdges = detector.findCycleEdgesFrom(GraphDto.nodeId("client", clientId));
 
         Map<String, GraphDto.Node> nodesById = new LinkedHashMap<>();
         List<GraphDto.Edge> edges = new ArrayList<>();
@@ -81,27 +95,19 @@ public class GraphEngineService {
             edges.add(GraphDto.Edge.relation(sourceNodeId, targetNodeId, relationType));
         }
 
-        for (Tuple row : moneyFlowRows) {
-            String sourceType = row.get("source_type", String.class);
-            Long sourceId = getLong(row, "source_id");
-            String targetType = row.get("target_type", String.class);
-            Long targetId = getLong(row, "target_id");
-            BigDecimal total = row.get("total_amount", BigDecimal.class);
-            Number countNum = row.get("tx_count", Number.class);
+        for (CycleDetector.MoneyEdge flow : moneyFlow.edges()) {
+            nodesById.putIfAbsent(flow.fromNodeId(), placeholderNodeFromId(flow.fromNodeId()));
+            nodesById.putIfAbsent(flow.toNodeId(), placeholderNodeFromId(flow.toNodeId()));
 
-            String sourceNodeId = GraphDto.nodeId(sourceType, sourceId);
-            String targetNodeId = GraphDto.nodeId(targetType, targetId);
+            // "Подозрительно" — ребро цикла ИЛИ предварительная эвристика для
+            // подсветки на фронте (крупная сумма / много операций); финальное
+            // решение о риске всегда остаётся за Risk Engine (⑤) — этот флаг
+            // не влияет на Risk Score.
+            boolean suspicious = cycleEdges.contains(flow)
+                    || flow.amount().compareTo(SUSPICIOUS_TOTAL) >= 0
+                    || flow.count() >= SUSPICIOUS_TX_COUNT;
 
-            nodesById.putIfAbsent(sourceNodeId, placeholderNode(sourceType, sourceId));
-            nodesById.putIfAbsent(targetNodeId, placeholderNode(targetType, targetId));
-
-            // "Подозрительно" здесь — предварительная эвристика для подсветки на фронте
-            // (крупная сумма ИЛИ много операций); финальное решение о риске всегда
-            // остаётся за Risk Engine (⑤) — этот флаг не влияет на Risk Score.
-            boolean suspicious = total.compareTo(new BigDecimal("300000000")) >= 0
-                    || countNum.intValue() >= 10;
-
-            edges.add(GraphDto.Edge.moneyFlow(sourceNodeId, targetNodeId, total, countNum.intValue(), suspicious));
+            edges.add(GraphDto.Edge.moneyFlow(flow.fromNodeId(), flow.toNodeId(), flow.amount(), flow.count(), suspicious));
         }
 
         enrichNodeLabelsAndFlags(nodesById);
@@ -362,42 +368,16 @@ public class GraphEngineService {
                 .getResultList();
     }
 
-    /**
-     * Агрегирует транзакции между клиентом и каждым counterpart-субъектом
-     * (владельцем счёта на другом конце) в money_flow-ребро. Смотрит
-     * только на прямые переводы клиента (глубина 1) — money_flow не
-     * рекурсивен, это агрегат фактических денежных операций, а не
-     * структурных связей.
-     */
-    @SuppressWarnings("unchecked")
-    private List<Tuple> fetchMoneyFlowEdges(Long clientId) {
-        String sql = """
-            SELECT
-                'client'::varchar AS source_type,
-                :clientId AS source_id,
-                counterpart.owner_type AS target_type,
-                counterpart.owner_id AS target_id,
-                SUM(t.amount) AS total_amount,
-                COUNT(*) AS tx_count
-            FROM transactions t
-            JOIN accounts own ON own.id IN (t.from_account, t.to_account)
-                             AND own.owner_type = 'client' AND own.owner_id = :clientId
-            JOIN accounts counterpart ON counterpart.id = (
-                CASE WHEN t.from_account = own.id THEN t.to_account ELSE t.from_account END
-            )
-            WHERE NOT (counterpart.owner_type = 'client' AND counterpart.owner_id = :clientId)
-            GROUP BY counterpart.owner_type, counterpart.owner_id
-            """;
-
-        return entityManager.createNativeQuery(sql, Tuple.class)
-                .setParameter("clientId", clientId)
-                .getResultList();
-    }
-
     private GraphDto.Node placeholderNode(String type, Long id) {
         // Метка и flagged проставляются позже в enrichNodeLabelsAndFlags —
         // на этом этапе просто резервируем узел, чтобы рёбра могли на него ссылаться.
         return new GraphDto.Node(GraphDto.nodeId(type, id), type, type + "_" + id, false);
+    }
+
+    private GraphDto.Node placeholderNodeFromId(String nodeId) {
+        // node id всегда "{type}_{dbId}" (см. GraphDto.nodeId), type без подчёркиваний.
+        String type = nodeId.substring(0, nodeId.indexOf('_'));
+        return new GraphDto.Node(nodeId, type, nodeId, false);
     }
 
     /**
