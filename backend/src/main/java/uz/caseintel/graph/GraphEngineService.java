@@ -98,36 +98,71 @@ public class GraphEngineService {
      * DossierDto.moneyCycles (см. комментарий в DossierDto.java —
      * R03 остаётся чистой функцией, не завися от порядка сервисов).
      *
-     * В отличие от build()/fetchMoneyFlowEdges (которые строят только
-     * звезду "клиент <-> counterpart" для отображения на фронте), здесь
-     * агрегируются НАПРАВЛЕННЫЕ денежные потоки между ВСЕМИ парами
-     * субъектов подграфа глубины 2 — иначе DFS в CycleDetector физически
-     * не сможет найти цикл A->B->C->A: ему нужно ребро B->C, а не только
-     * связи клиента с B и с C по отдельности.
+     * ИСПРАВЛЕНО (было архитектурным пробелом): множество субъектов
+     * подграфа теперь строится BFS-обходом ГЛУБИНОЙ MAX_DEPTH через ДВА
+     * источника соседей на каждом шаге — таблицу relationships И саму
+     * таблицу transactions. Раньше подграф собирался только через
+     * fetchRelationSubgraph (structural CTE), и посредник в круговой
+     * схеме, связанный с остальными участниками ТОЛЬКО денежным
+     * переводом (без явной записи в relationships), был невидим для
+     * CycleDetector — цикл A->B->C->A физически не находился, если
+     * B и C не были явно связаны в relationships, даже если деньги
+     * реально прошли через B. Теперь узел B будет обнаружен уже на
+     * первой итерации BFS через fetchDirectTransactionNeighbors,
+     * даже без какой-либо записи в relationships.
+     *
+     * Компромисс производительности: BFS делает 2 запроса (relation +
+     * transaction соседи) НА КАЖДЫЙ узел на каждом уровне глубины — это
+     * не batched-подход. На масштабе одного расследования (обычно
+     * единицы-десятки узлов в подграфе глубины 2) это несущественно;
+     * если подграф когда-нибудь станет на порядок крупнее, стоит
+     * переписать на batched IN-запрос по всему frontier сразу, а не
+     * по одному owner'у за раз.
      */
     @Transactional(readOnly = true)
     public MoneyFlowGraph buildMoneyFlowGraph(Long clientId) {
-        List<Tuple> relationRows = fetchRelationSubgraph(clientId);
-
-        // Собираем множество узлов подграфа (client + всё, до чего дотянулся CTE).
         record OwnerRef(String type, Long id) {}
-        Set<OwnerRef> owners = new LinkedHashSet<>();
-        owners.add(new OwnerRef("client", clientId));
 
-        for (Tuple row : relationRows) {
-            owners.add(new OwnerRef(row.get("source_type", String.class), row.get("source_id", Long.class)));
-            owners.add(new OwnerRef(row.get("target_type", String.class), row.get("target_id", Long.class)));
+        OwnerRef root = new OwnerRef("client", clientId);
+        Set<OwnerRef> discovered = new LinkedHashSet<>();
+        discovered.add(root);
+
+        Set<OwnerRef> frontier = new LinkedHashSet<>();
+        frontier.add(root);
+
+        // BFS: на каждом шаге расширяем множество узлов подграфа соседями
+        // по ОБОИМ источникам (relationships + transactions), а не только
+        // по одному. MAX_DEPTH шагов — тот же радиус, что и у структурного
+        // подграфа для консистентности того, что видит аналитик на графе.
+        for (int depth = 0; depth < MAX_DEPTH && !frontier.isEmpty(); depth++) {
+            Set<OwnerRef> nextFrontier = new LinkedHashSet<>();
+
+            for (OwnerRef owner : frontier) {
+                for (Tuple row : fetchDirectRelationNeighbors(owner.type(), owner.id())) {
+                    OwnerRef neighbor = new OwnerRef(row.get("owner_type", String.class), row.get("owner_id", Long.class));
+                    if (discovered.add(neighbor)) {
+                        nextFrontier.add(neighbor);
+                    }
+                }
+                for (Tuple row : fetchDirectTransactionNeighbors(owner.type(), owner.id())) {
+                    OwnerRef neighbor = new OwnerRef(row.get("owner_type", String.class), row.get("owner_id", Long.class));
+                    if (discovered.add(neighbor)) {
+                        nextFrontier.add(neighbor);
+                    }
+                }
+            }
+
+            frontier = nextFrontier;
         }
 
-        if (owners.size() <= 1) {
-            // Клиент без связей — цикл в принципе невозможен, не тратим запрос на пустой подграф.
+        if (discovered.size() <= 1) {
             Map<String, String> onlyClientLabel = new LinkedHashMap<>();
             onlyClientLabel.put(GraphDto.nodeId("client", clientId), "Клиент #" + clientId);
             return new MoneyFlowGraph(List.of(), onlyClientLabel);
         }
 
-        List<String> ownerTypesList = owners.stream().map(OwnerRef::type).toList();
-        List<Long> ownerIdsList = owners.stream().map(OwnerRef::id).toList();
+        List<String> ownerTypesList = discovered.stream().map(OwnerRef::type).toList();
+        List<Long> ownerIdsList = discovered.stream().map(OwnerRef::id).toList();
 
         List<Tuple> directedFlowRows = fetchDirectedMoneyFlowsWithinSubgraph(ownerTypesList, ownerIdsList);
 
@@ -154,6 +189,48 @@ public class GraphEngineService {
         enrichLabelsOnly(labels);
 
         return new MoneyFlowGraph(edges, labels);
+    }
+
+    /** Прямые relationship-соседи owner (owner может быть и source, и target в строке). */
+    @SuppressWarnings("unchecked")
+    private List<Tuple> fetchDirectRelationNeighbors(String ownerType, Long ownerId) {
+        String sql = """
+            SELECT
+                CASE WHEN source_type = :ownerType AND source_id = :ownerId THEN target_type ELSE source_type END AS owner_type,
+                CASE WHEN source_type = :ownerType AND source_id = :ownerId THEN target_id ELSE source_id END AS owner_id
+            FROM relationships
+            WHERE (source_type = :ownerType AND source_id = :ownerId)
+               OR (target_type = :ownerType AND target_id = :ownerId)
+            """;
+        return entityManager.createNativeQuery(sql, Tuple.class)
+                .setParameter("ownerType", ownerType)
+                .setParameter("ownerId", ownerId)
+                .getResultList();
+    }
+
+    /**
+     * Прямые "денежные" соседи owner — любой другой owner_type/owner_id,
+     * с которым у owner есть хотя бы одна транзакция в любую сторону.
+     * Это и есть недостающий источник соседей, из-за отсутствия которого
+     * посредники в круговых схемах без явного relationships-ребра были
+     * невидимы для Graph Engine (см. javadoc buildMoneyFlowGraph выше).
+     */
+    @SuppressWarnings("unchecked")
+    private List<Tuple> fetchDirectTransactionNeighbors(String ownerType, Long ownerId) {
+        String sql = """
+            SELECT DISTINCT counterpart.owner_type AS owner_type, counterpart.owner_id AS owner_id
+            FROM transactions t
+            JOIN accounts own ON own.id IN (t.from_account, t.to_account)
+                             AND own.owner_type = :ownerType AND own.owner_id = :ownerId
+            JOIN accounts counterpart ON counterpart.id = (
+                CASE WHEN t.from_account = own.id THEN t.to_account ELSE t.from_account END
+            )
+            WHERE NOT (counterpart.owner_type = :ownerType AND counterpart.owner_id = :ownerId)
+            """;
+        return entityManager.createNativeQuery(sql, Tuple.class)
+                .setParameter("ownerType", ownerType)
+                .setParameter("ownerId", ownerId)
+                .getResultList();
     }
 
     /** Пара (рёбра, метки), готовая к передаче в конструктор CycleDetector. */

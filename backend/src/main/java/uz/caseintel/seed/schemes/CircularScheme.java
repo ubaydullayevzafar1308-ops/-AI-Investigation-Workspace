@@ -42,13 +42,14 @@ public class CircularScheme {
 
         support.insertRelationship(support.clientAccountType(), clientId, "company", companyAId,
                 "director", BigDecimal.ONE);
-        // ВАЖНО: buildMoneyFlowGraph (см. GraphEngineService) собирает множество
-        // субъектов подграфа ТОЛЬКО через таблицу relationships (рекурсивный CTE),
-        // а не через сами транзакции. Без явной связи companyB осталась бы вне
-        // подграфа, и CycleDetector физически не увидел бы её как узел — цикл
-        // "потерялся" бы для R03, хотя деньги реально прошли через неё. Поэтому
-        // связываем все три субъекта цикла явно, а не полагаемся на то, что
-        // Graph Engine сам "откроет" companyB по денежному следу.
+        // Раньше это было ОБЯЗАТЕЛЬНЫМ workaround'ом: buildMoneyFlowGraph
+        // (GraphEngineService) собирал подграф только через relationships,
+        // и без этой связи companyB была бы невидима для CycleDetector даже
+        // при наличии реального денежного перевода через неё. Это исправлено
+        // (GraphEngineService теперь находит соседей и через transactions),
+        // так что технически эта связь больше не обязательна для того, чтобы
+        // R03 сработал — оставляем её как реалистичную деталь данных
+        // (директор часто действительно знаком с контрагентами своей фирмы).
         support.insertRelationship("company", companyAId, "company", companyBId,
                 "frequent_counterparty", BigDecimal.ONE);
 
