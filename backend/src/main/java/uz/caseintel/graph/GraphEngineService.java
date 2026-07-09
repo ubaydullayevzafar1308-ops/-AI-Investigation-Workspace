@@ -35,6 +35,24 @@ public class GraphEngineService {
     @PersistenceContext
     private EntityManager entityManager;
 
+    /**
+     * Безопасное извлечение Long-колонки из Hibernate Tuple.
+     *
+     * БАГ, НАЙДЕННЫЙ ПРИ ПЕРВОМ ЖИВОМ ПРОГОНЕ (не был пойман trace'ом в
+     * песочнице без реальной Postgres): row.get("col", Long.class)
+     * бросает ClassCastException, если JDBC-драйвер вернул значение как
+     * java.lang.Integer (для BIGINT-колонки это реально происходит —
+     * зависит от конкретного значения и от того, как pgjdbc решил
+     * представить число). Hibernate's NativeQueryTupleTransformer делает
+     * СТРОГИЙ cast, а не безопасную конвертацию типов Number. Через
+     * Number.longValue() это работает независимо от того, что именно
+     * вернул драйвер (Integer, Long, BigInteger — что угодно Number).
+     */
+    private static Long getLong(Tuple row, String column) {
+        Object value = row.get(column);
+        return value == null ? null : ((Number) value).longValue();
+    }
+
     @Transactional(readOnly = true)
     public GraphDto build(Long clientId) {
         List<Tuple> relationRows = fetchRelationSubgraph(clientId);
@@ -49,9 +67,9 @@ public class GraphEngineService {
 
         for (Tuple row : relationRows) {
             String sourceType = row.get("source_type", String.class);
-            Long sourceId = row.get("source_id", Long.class);
+            Long sourceId = getLong(row, "source_id");
             String targetType = row.get("target_type", String.class);
-            Long targetId = row.get("target_id", Long.class);
+            Long targetId = getLong(row, "target_id");
             String relationType = row.get("relation_type", String.class);
 
             String sourceNodeId = GraphDto.nodeId(sourceType, sourceId);
@@ -65,9 +83,9 @@ public class GraphEngineService {
 
         for (Tuple row : moneyFlowRows) {
             String sourceType = row.get("source_type", String.class);
-            Long sourceId = row.get("source_id", Long.class);
+            Long sourceId = getLong(row, "source_id");
             String targetType = row.get("target_type", String.class);
-            Long targetId = row.get("target_id", Long.class);
+            Long targetId = getLong(row, "target_id");
             BigDecimal total = row.get("total_amount", BigDecimal.class);
             Number countNum = row.get("tx_count", Number.class);
 
@@ -139,13 +157,13 @@ public class GraphEngineService {
 
             for (OwnerRef owner : frontier) {
                 for (Tuple row : fetchDirectRelationNeighbors(owner.type(), owner.id())) {
-                    OwnerRef neighbor = new OwnerRef(row.get("owner_type", String.class), row.get("owner_id", Long.class));
+                    OwnerRef neighbor = new OwnerRef(row.get("owner_type", String.class), getLong(row, "owner_id"));
                     if (discovered.add(neighbor)) {
                         nextFrontier.add(neighbor);
                     }
                 }
                 for (Tuple row : fetchDirectTransactionNeighbors(owner.type(), owner.id())) {
-                    OwnerRef neighbor = new OwnerRef(row.get("owner_type", String.class), row.get("owner_id", Long.class));
+                    OwnerRef neighbor = new OwnerRef(row.get("owner_type", String.class), getLong(row, "owner_id"));
                     if (discovered.add(neighbor)) {
                         nextFrontier.add(neighbor);
                     }
@@ -172,9 +190,9 @@ public class GraphEngineService {
 
         for (Tuple row : directedFlowRows) {
             String fromType = row.get("from_owner_type", String.class);
-            Long fromId = row.get("from_owner_id", Long.class);
+            Long fromId = getLong(row, "from_owner_id");
             String toType = row.get("to_owner_type", String.class);
-            Long toId = row.get("to_owner_id", Long.class);
+            Long toId = getLong(row, "to_owner_id");
             BigDecimal total = row.get("total_amount", BigDecimal.class);
             Number countNum = row.get("tx_count", Number.class);
 
