@@ -13,7 +13,8 @@ const SEVERITY_STYLES = {
 };
 
 export default function AlertsList() {
-  const { data: alerts, loading, error, refetch } = useApi(api.listAlerts, []);
+  const { data: page, loading, error, refetch } = useApi(api.listAlerts, []);
+  const alerts = page?.content;
   const [investigatingId, setInvestigatingId] = useState(null);
   const navigate = useNavigate();
 

@@ -2,12 +2,15 @@ package uz.caseintel.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
-import java.util.List;
 import uz.caseintel.audit.AuditService;
+import uz.caseintel.casebuilder.dto.DossierDto;
 import uz.caseintel.entity.Case;
 import uz.caseintel.evidence.EvidenceBundle;
 import uz.caseintel.explainability.ExplanationDto;
 import uz.caseintel.repository.CaseRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -15,6 +18,7 @@ import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -44,14 +48,31 @@ public class CaseController {
     }
 
     @GetMapping
-    public List<CaseSummaryDto> list() {
-        return caseRepository.findAll().stream().map(CaseSummaryDto::from).toList();
+    public Page<CaseSummaryDto> list(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        var pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
+        return caseRepository.findAll(pageable).map(CaseSummaryDto::from);
     }
 
-    /** Сводка по кейсу; полные dossier/evidence/explanation — через отдельные эндпоинты ниже. */
+    /** Полное досье: summary + разобранные dossier/evidence/explanation из JSONB. */
     @GetMapping("/{id}")
-    public CaseSummaryDto get(@PathVariable Long id) {
-        return CaseSummaryDto.from(findOrThrow(id));
+    public CaseDetailDto get(@PathVariable Long id) {
+        Case c = findOrThrow(id);
+        return new CaseDetailDto(
+                c.getId(),
+                c.getAlert() != null ? c.getAlert().getId() : null,
+                c.getClient() != null ? c.getClient().getId() : null,
+                c.getRiskScore(),
+                c.getRiskLevel(),
+                c.getStatus(),
+                c.getAnalystDecision(),
+                c.getCreatedAt(),
+                c.getClosedAt(),
+                parseJson(c.getDossierJson(), DossierDto.class),
+                parseJson(c.getEvidenceJson(), EvidenceBundle.class),
+                parseJson(c.getExplanationJson(), ExplanationDto.class)
+        );
     }
 
     @GetMapping("/{id}/evidence")
