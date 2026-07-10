@@ -1,15 +1,18 @@
 package uz.caseintel.api;
 
-import java.time.Duration;
-import java.util.List;
-import uz.caseintel.entity.Case;
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
+import java.util.Map;
+import java.util.stream.Collectors;
 import uz.caseintel.repository.CaseRepository;
+import uz.caseintel.repository.RuleHitRepository;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * GET /api/dashboard/metrics — время на кейс, обработано, экономия часов.
+ * GET /api/dashboard/metrics — кейсов всего/за сегодня, средний Risk
+ * Score, распределение срабатываний по правилам, оценка экономии времени.
  * См. ARCHITECTURE.md §14, §15 (экран Dashboard).
  */
 @RestController
@@ -17,58 +20,39 @@ import org.springframework.web.bind.annotation.RestController;
 public class DashboardController {
 
     /**
-     * Условная оценка среднего времени РУЧНОГО расследования одного кейса
-     * без платформы — используется только для метрики "экономия часов"
-     * на демо-дашборде. Это не измеренное значение, а ориентир из
-     * питча ("от десятков минут до нескольких часов на сложный кейс") —
-     * стоит заменить реальной цифрой из интервью с банком, если она
-     * появится, вместо константы для хакатон-демо.
+     * Условная оценка экономии времени на один кейс за счёт платформы —
+     * ориентир для демо-дашборда, не измеренное значение (см. питч:
+     * "от десятков минут до нескольких часов на сложный кейс вручную").
      */
-    private static final double ESTIMATED_MANUAL_MINUTES_PER_CASE = 45.0;
+    private static final double HOURS_SAVED_PER_CASE = 3.5;
 
     private final CaseRepository caseRepository;
+    private final RuleHitRepository ruleHitRepository;
 
-    public DashboardController(CaseRepository caseRepository) {
+    public DashboardController(CaseRepository caseRepository, RuleHitRepository ruleHitRepository) {
         this.caseRepository = caseRepository;
+        this.ruleHitRepository = ruleHitRepository;
     }
 
     public record DashboardMetrics(
-            long totalCasesProcessed,
-            long casesOpen,
-            long casesApproved,
-            long casesRejected,
-            long casesEscalated,
-            Double avgMinutesPerCase,
+            long totalCases,
+            long casesToday,
+            Double avgRiskScore,
+            Map<String, Long> ruleDistribution,
             double estimatedHoursSaved
     ) {}
 
     @GetMapping("/metrics")
     public DashboardMetrics metrics() {
-        List<Case> allCases = caseRepository.findAll();
+        long total = caseRepository.count();
+        long today = caseRepository.countByCreatedAtGreaterThanEqual(
+                OffsetDateTime.now().truncatedTo(ChronoUnit.DAYS));
+        Double avgRiskScore = caseRepository.averageRiskScore();
+        Map<String, Long> ruleDistribution = ruleHitRepository.countByRuleCode().stream()
+                .collect(Collectors.toMap(
+                        RuleHitRepository.RuleCountProjection::getRuleCode,
+                        RuleHitRepository.RuleCountProjection::getHitCount));
 
-        long total = allCases.size();
-        long open = countByStatus(allCases, Case.STATUS_OPEN);
-        long approved = countByStatus(allCases, Case.STATUS_APPROVED);
-        long rejected = countByStatus(allCases, Case.STATUS_REJECTED);
-        long escalated = countByStatus(allCases, Case.STATUS_ESCALATED);
-
-        List<Case> closedWithDuration = allCases.stream()
-                .filter(c -> c.getClosedAt() != null && c.getCreatedAt() != null)
-                .toList();
-
-        Double avgMinutes = closedWithDuration.isEmpty() ? null : closedWithDuration.stream()
-                .mapToLong(c -> Duration.between(c.getCreatedAt(), c.getClosedAt()).toMinutes())
-                .average()
-                .orElse(0.0);
-
-        double estimatedHoursSaved = avgMinutes == null
-                ? 0.0
-                : closedWithDuration.size() * (ESTIMATED_MANUAL_MINUTES_PER_CASE - avgMinutes) / 60.0;
-
-        return new DashboardMetrics(total, open, approved, rejected, escalated, avgMinutes, estimatedHoursSaved);
-    }
-
-    private long countByStatus(List<Case> cases, String status) {
-        return cases.stream().filter(c -> status.equals(c.getStatus())).count();
+        return new DashboardMetrics(total, today, avgRiskScore, ruleDistribution, total * HOURS_SAVED_PER_CASE);
     }
 }

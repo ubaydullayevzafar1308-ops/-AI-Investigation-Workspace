@@ -106,6 +106,11 @@ public class SeedRunner implements CommandLineRunner {
      * следующий id = 1. Без этого шага первый же обычный INSERT через
      * приложение (например создание Case через API) упадёт с конфликтом
      * первичного ключа. setval сдвигает sequence на текущий max(id)+1.
+     *
+     * Третий аргумент setval (is_called=false) означает "следующий
+     * nextval вернёт ровно это значение". Без него пустые таблицы
+     * (cases, reports, ...) получали setval(seq, 1) = "1 уже занят",
+     * и первый созданный через API кейс имел id 2 вместо 1.
      */
     private void fixSequencesAfterSeed() {
         String[] tables = {
@@ -114,7 +119,7 @@ public class SeedRunner implements CommandLineRunner {
         };
         for (String table : tables) {
             jdbc.execute("""
-                SELECT setval(pg_get_serial_sequence('%s', 'id'), COALESCE((SELECT MAX(id) FROM %s), 1))
+                SELECT setval(pg_get_serial_sequence('%s', 'id'), COALESCE((SELECT MAX(id) FROM %s), 0) + 1, false)
                 """.formatted(table, table));
         }
     }

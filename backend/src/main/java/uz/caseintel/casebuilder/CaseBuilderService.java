@@ -2,12 +2,14 @@ package uz.caseintel.casebuilder;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
+import java.util.List;
 import uz.caseintel.audit.AuditService;
 import uz.caseintel.casebuilder.dto.ReadyCaseDto;
 import uz.caseintel.datacollector.DataCollectorService;
 import uz.caseintel.entity.Alert;
 import uz.caseintel.entity.AuditLog;
 import uz.caseintel.entity.Case;
+import uz.caseintel.entity.RuleHit;
 import uz.caseintel.evidence.EvidenceCollectorService;
 import uz.caseintel.explainability.ExplainabilityService;
 import uz.caseintel.graph.GraphEngineService;
@@ -15,9 +17,13 @@ import uz.caseintel.llm.LlmService;
 import uz.caseintel.llm.SafeJsonMapper;
 import uz.caseintel.report.ReportGeneratorService;
 import uz.caseintel.repository.AlertRepository;
+import uz.caseintel.repository.AuditLogRepository;
 import uz.caseintel.repository.CaseRepository;
+import uz.caseintel.repository.ReportRepository;
+import uz.caseintel.repository.RuleHitRepository;
 import uz.caseintel.risk.RiskEngineService;
 import uz.caseintel.rules.RuleEngineService;
+import uz.caseintel.rules.RuleResult;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -56,6 +62,9 @@ public class CaseBuilderService {
     private final AuditService audit;
     private final AlertRepository alertRepository;
     private final CaseRepository caseRepository;
+    private final ReportRepository reportRepository;
+    private final AuditLogRepository auditLogRepository;
+    private final RuleHitRepository ruleHitRepository;
     private final ObjectMapper objectMapper;
 
     public CaseBuilderService(
@@ -71,6 +80,9 @@ public class CaseBuilderService {
             AuditService audit,
             AlertRepository alertRepository,
             CaseRepository caseRepository,
+            ReportRepository reportRepository,
+            AuditLogRepository auditLogRepository,
+            RuleHitRepository ruleHitRepository,
             ObjectMapper objectMapper) {
         this.dataCollector = dataCollector;
         this.ruleEngine = ruleEngine;
@@ -84,6 +96,9 @@ public class CaseBuilderService {
         this.audit = audit;
         this.alertRepository = alertRepository;
         this.caseRepository = caseRepository;
+        this.reportRepository = reportRepository;
+        this.auditLogRepository = auditLogRepository;
+        this.ruleHitRepository = ruleHitRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -111,12 +126,19 @@ public class CaseBuilderService {
         caseEntity = caseRepository.save(caseEntity);
         ctx.setCaseEntity(caseEntity);
 
+        // Алерт взят в работу — часть той же транзакции, что и создание
+        // кейса: либо кейс создан И алерт investigating, либо ни то ни другое.
+        alert.setStatus(Alert.STATUS_INVESTIGATING);
+        alertRepository.save(alert);
+
         // ① Сбор данных (включает вызов CycleDetector заранее — см. javadoc класса)
         ctx.setDossier(dataCollector.collect(alertId));
         audit.log(caseEntity, AuditLog.EVENT_CASE_CREATED, null);
 
-        // ② Правила
+        // ② Правила (+ персистенция в rule_hits — источник правды для
+        // причин Risk Score, трассируемый до конкретных транзакций)
         ctx.setRuleHits(ruleEngine.runAll(ctx.getDossier()));
+        persistRuleHits(caseEntity, ctx.getRuleHits());
         audit.log(caseEntity, AuditLog.EVENT_RULES_EXECUTED, null);
 
         // ③ Граф (полный граф для фронта; циклы для R03 уже посчитаны в ①)
@@ -158,36 +180,74 @@ public class CaseBuilderService {
                 caseEntity.getId(),
                 ctx.getAlertId(),
                 ctx.getDossier().clientId(),
+                caseEntity.getClient().getFullName(),
                 ctx.getRisk(),
                 ctx.getEvidence(),
                 ctx.getExplanation(),
                 humanExplanation,
                 reportDraft,
-                caseEntity.getStatus()
+                caseEntity.getStatus(),
+                caseEntity.getCreatedAt(),
+                ctx.getRuleHits().size(),
+                ctx.getEvidence().items().size()
         );
     }
 
+    /**
+     * Идемпотентный повтор: кейс уже собран — восстанавливаем ReadyCaseDto
+     * целиком из персистентных снапшотов, ничего не пересчитывая и не
+     * вызывая LLM заново. Черновик отчёта берётся из reports (финальная
+     * правка аналитика приоритетнее черновика), humanExplanation — из
+     * audit_log (первый llm_called кейса — это ответ explainRisk,
+     * см. javadoc финдера в AuditLogRepository).
+     */
     private ReadyCaseDto mapExistingCaseToDto(Case caseEntity) {
+        String reportDraft = reportRepository.findByCaseEntityId(caseEntity.getId())
+                .map(r -> r.getFinalText() != null ? r.getFinalText() : r.getDraftText())
+                .orElse("");
+        String humanExplanation = auditLogRepository
+                .findFirstByCaseEntityIdAndEventTypeOrderByIdAsc(caseEntity.getId(), AuditLog.EVENT_LLM_CALLED)
+                .map(AuditLog::getLlmResponse)
+                .orElse("");
         try {
             var evidence = objectMapper.readValue(caseEntity.getEvidenceJson(), uz.caseintel.evidence.EvidenceBundle.class);
             var explanation = objectMapper.readValue(caseEntity.getExplanationJson(), uz.caseintel.explainability.ExplanationDto.class);
             var risk = new uz.caseintel.risk.RiskResult(caseEntity.getRiskScore(), caseEntity.getRiskLevel());
+            long ruleHitsCount = evidence.items().stream()
+                    .filter(e -> uz.caseintel.evidence.Evidence.TYPE_RULE_HIT.equals(e.type()))
+                    .count();
             return new ReadyCaseDto(
                     caseEntity.getId(),
                     caseEntity.getAlert().getId(),
                     caseEntity.getClient().getId(),
+                    caseEntity.getClient().getFullName(),
                     risk,
                     evidence,
                     explanation,
-                    "Уровень риска: " + caseEntity.getRiskLevel().toUpperCase() + " (" + caseEntity.getRiskScore() + "/100)",
-                    "[Черновик отчёта из базы]",
-                    caseEntity.getStatus()
+                    humanExplanation,
+                    reportDraft,
+                    caseEntity.getStatus(),
+                    caseEntity.getCreatedAt(),
+                    (int) ruleHitsCount,
+                    evidence.items().size()
             );
         } catch (Exception e) {
-            return new ReadyCaseDto(
-                    caseEntity.getId(), caseEntity.getAlert().getId(), caseEntity.getClient().getId(),
-                    null, null, null, "[ошибка десериализации]", "[ошибка]", caseEntity.getStatus()
-            );
+            throw new IllegalStateException(
+                    "Failed to restore persisted case snapshots for case " + caseEntity.getId(), e);
+        }
+    }
+
+    private void persistRuleHits(Case caseEntity, List<RuleResult> hits) {
+        for (RuleResult hit : hits) {
+            ruleHitRepository.save(RuleHit.builder()
+                    .caseEntity(caseEntity)
+                    .ruleCode(hit.code())
+                    .ruleName(hit.name())
+                    .weight(hit.weight())
+                    .evidenceJson(toJson(hit.evidence()))
+                    .explanation(hit.explanation())
+                    .createdAt(OffsetDateTime.now())
+                    .build());
         }
     }
 

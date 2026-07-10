@@ -1,10 +1,11 @@
 package uz.caseintel.api;
 
-import java.util.List;
 import uz.caseintel.casebuilder.CaseBuilderService;
 import uz.caseintel.casebuilder.dto.ReadyCaseDto;
-import uz.caseintel.entity.Alert;
 import uz.caseintel.repository.AlertRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -29,37 +30,31 @@ public class AlertController {
     }
 
     /**
-     * Список алертов, опциональные фильтры status/severity.
-     * Возвращает AlertSummaryDto, а не саму Alert entity — см. javadoc
-     * AlertSummaryDto. @Transactional нужен, чтобы getTransaction()/getClient()
-     * внутри from() работали (open-in-view выключен).
+     * Список алертов: опциональные фильтры status/severity (комбинируются
+     * через AND — см. AlertRepository.search), сортировка created_at desc,
+     * пагинация page/size. Возвращает AlertSummaryDto, а не саму Alert
+     * entity — см. javadoc AlertSummaryDto. @Transactional нужен, чтобы
+     * getTransaction()/getClient() внутри from() работали (open-in-view
+     * выключен).
      */
     @GetMapping
     @Transactional(readOnly = true)
-    public List<AlertSummaryDto> list(
+    public Page<AlertSummaryDto> list(
             @RequestParam(required = false) String status,
-            @RequestParam(required = false) String severity) {
-        List<Alert> alerts;
-        if (status != null) {
-            alerts = alertRepository.findByStatus(status);
-        } else if (severity != null) {
-            alerts = alertRepository.findBySeverity(severity);
-        } else {
-            alerts = alertRepository.findAll();
-        }
-        return alerts.stream().map(AlertSummaryDto::from).toList();
+            @RequestParam(required = false) String severity,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        var pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
+        return alertRepository.search(status, severity, pageable).map(AlertSummaryDto::from);
     }
 
-    /** Запускает Case Builder для алерта -> возвращает готовый кейс. */
+    /**
+     * Запускает Case Builder для алерта -> возвращает готовый кейс.
+     * Перевод алерта в investigating происходит внутри buildCase, в одной
+     * транзакции с созданием кейса.
+     */
     @PostMapping("/{id}/investigate")
     public ReadyCaseDto investigate(@PathVariable Long id) {
-        ReadyCaseDto readyCase = caseBuilderService.buildCase(id);
-
-        alertRepository.findById(id).ifPresent(alert -> {
-            alert.setStatus(Alert.STATUS_INVESTIGATING);
-            alertRepository.save(alert);
-        });
-
-        return readyCase;
+        return caseBuilderService.buildCase(id);
     }
 }
