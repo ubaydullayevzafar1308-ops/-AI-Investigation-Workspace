@@ -5,6 +5,7 @@ import uz.caseintel.casebuilder.CaseBuilderService;
 import uz.caseintel.casebuilder.dto.ReadyCaseDto;
 import uz.caseintel.entity.Alert;
 import uz.caseintel.repository.AlertRepository;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -27,18 +28,26 @@ public class AlertController {
         this.caseBuilderService = caseBuilderService;
     }
 
-    /** Список алертов, опциональные фильтры status/severity. */
+    /**
+     * Список алертов, опциональные фильтры status/severity.
+     * Возвращает AlertSummaryDto, а не саму Alert entity — см. javadoc
+     * AlertSummaryDto. @Transactional нужен, чтобы getTransaction()/getClient()
+     * внутри from() работали (open-in-view выключен).
+     */
     @GetMapping
-    public List<Alert> list(
+    @Transactional(readOnly = true)
+    public List<AlertSummaryDto> list(
             @RequestParam(required = false) String status,
             @RequestParam(required = false) String severity) {
+        List<Alert> alerts;
         if (status != null) {
-            return alertRepository.findByStatus(status);
+            alerts = alertRepository.findByStatus(status);
+        } else if (severity != null) {
+            alerts = alertRepository.findBySeverity(severity);
+        } else {
+            alerts = alertRepository.findAll();
         }
-        if (severity != null) {
-            return alertRepository.findBySeverity(severity);
-        }
-        return alertRepository.findAll();
+        return alerts.stream().map(AlertSummaryDto::from).toList();
     }
 
     /** Запускает Case Builder для алерта -> возвращает готовый кейс. */

@@ -94,6 +94,14 @@ public class CaseBuilderService {
         Alert alert = alertRepository.findById(alertId)
                 .orElseThrow(() -> new IllegalArgumentException("Alert not found: " + alertId));
 
+        // Идемпотентность: если для этого алерта уже есть кейс, вернуть его
+        var existingCase = caseRepository.findByAlertId(alertId);
+        if (existingCase.isPresent()) {
+            var caseEntity = existingCase.get();
+            ctx.setCaseEntity(caseEntity);
+            return mapExistingCaseToDto(caseEntity);
+        }
+
         Case caseEntity = Case.builder()
                 .alert(alert)
                 .client(alert.getClient())
@@ -157,6 +165,30 @@ public class CaseBuilderService {
                 reportDraft,
                 caseEntity.getStatus()
         );
+    }
+
+    private ReadyCaseDto mapExistingCaseToDto(Case caseEntity) {
+        try {
+            var evidence = objectMapper.readValue(caseEntity.getEvidenceJson(), uz.caseintel.evidence.EvidenceBundle.class);
+            var explanation = objectMapper.readValue(caseEntity.getExplanationJson(), uz.caseintel.explainability.ExplanationDto.class);
+            var risk = new uz.caseintel.risk.RiskResult(caseEntity.getRiskScore(), caseEntity.getRiskLevel());
+            return new ReadyCaseDto(
+                    caseEntity.getId(),
+                    caseEntity.getAlert().getId(),
+                    caseEntity.getClient().getId(),
+                    risk,
+                    evidence,
+                    explanation,
+                    "Уровень риска: " + caseEntity.getRiskLevel().toUpperCase() + " (" + caseEntity.getRiskScore() + "/100)",
+                    "[Черновик отчёта из базы]",
+                    caseEntity.getStatus()
+            );
+        } catch (Exception e) {
+            return new ReadyCaseDto(
+                    caseEntity.getId(), caseEntity.getAlert().getId(), caseEntity.getClient().getId(),
+                    null, null, null, "[ошибка десериализации]", "[ошибка]", caseEntity.getStatus()
+            );
+        }
     }
 
     private String toJson(Object value) {
