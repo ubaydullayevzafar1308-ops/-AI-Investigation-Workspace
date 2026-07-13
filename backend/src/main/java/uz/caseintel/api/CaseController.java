@@ -2,14 +2,18 @@ package uz.caseintel.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import uz.caseintel.audit.AuditService;
 import uz.caseintel.casebuilder.dto.DossierDto;
 import uz.caseintel.entity.Case;
 import uz.caseintel.evidence.EvidenceBundle;
 import uz.caseintel.explainability.ExplanationDto;
 import uz.caseintel.repository.CaseRepository;
-import org.springframework.data.domain.Page;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Slice;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.transaction.annotation.Transactional;
@@ -37,6 +41,8 @@ import org.springframework.web.server.ResponseStatusException;
 @Transactional(readOnly = true)
 public class CaseController {
 
+    private static final Logger log = LoggerFactory.getLogger(CaseController.class);
+
     private final CaseRepository caseRepository;
     private final AuditService audit;
     private final ObjectMapper objectMapper;
@@ -47,18 +53,27 @@ public class CaseController {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * Без totalElements/totalPages — сейчас у списка кейсов нет фронтенд-
+     * потребителя, которому они нужны (в отличие от /api/alerts), поэтому
+     * Slice вместо Page — без лишнего COUNT(*) на каждый запрос.
+     */
     @GetMapping
-    public Page<CaseSummaryDto> list(
+    public Slice<CaseSummaryDto> list(
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
         var pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-        return caseRepository.findAll(pageable).map(CaseSummaryDto::from);
+        return caseRepository.findAllBy(pageable).map(CaseSummaryDto::from);
     }
 
     /** Полное досье: summary + разобранные dossier/evidence/explanation из JSONB. */
     @GetMapping("/{id}")
     public CaseDetailDto get(@PathVariable Long id) {
         Case c = findOrThrow(id);
+        List<String> warnings = new ArrayList<>();
+        DossierDto dossier = parseJson(c.getDossierJson(), DossierDto.class, warnings);
+        EvidenceBundle evidence = parseJson(c.getEvidenceJson(), EvidenceBundle.class, warnings);
+        ExplanationDto explanation = parseJson(c.getExplanationJson(), ExplanationDto.class, warnings);
         return new CaseDetailDto(
                 c.getId(),
                 c.getAlert() != null ? c.getAlert().getId() : null,
@@ -69,22 +84,23 @@ public class CaseController {
                 c.getAnalystDecision(),
                 c.getCreatedAt(),
                 c.getClosedAt(),
-                parseJson(c.getDossierJson(), DossierDto.class),
-                parseJson(c.getEvidenceJson(), EvidenceBundle.class),
-                parseJson(c.getExplanationJson(), ExplanationDto.class)
+                dossier,
+                evidence,
+                explanation,
+                warnings.isEmpty() ? null : String.join("; ", warnings)
         );
     }
 
     @GetMapping("/{id}/evidence")
     public EvidenceBundle getEvidence(@PathVariable Long id) {
         Case c = findOrThrow(id);
-        return parseJson(c.getEvidenceJson(), EvidenceBundle.class);
+        return parseJson(c.getEvidenceJson(), EvidenceBundle.class, null);
     }
 
     @GetMapping("/{id}/explanation")
     public ExplanationDto getExplanation(@PathVariable Long id) {
         Case c = findOrThrow(id);
-        return parseJson(c.getExplanationJson(), ExplanationDto.class);
+        return parseJson(c.getExplanationJson(), ExplanationDto.class, null);
     }
 
     public record DecisionRequest(String status, String comment) {}
@@ -114,14 +130,26 @@ public class CaseController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Case not found: " + id));
     }
 
-    private <T> T parseJson(String json, Class<T> type) {
+    /**
+     * Безопасный парсинг JSONB-снапшота: битый/несовместимый JSON больше
+     * не роняет запрос 500-кой — логируем полный stack trace (реальная
+     * порча данных должна быть видна в логах) и возвращаем null для этого
+     * поля, добавляя человекочитаемое сообщение в warnings (если вызывающий
+     * код его передал — GET /{id}/evidence и /{id}/explanation отдают
+     * "голый" тип без обёртки для warning, поэтому там warnings == null).
+     */
+    private <T> T parseJson(String json, Class<T> type, List<String> warnings) {
         if (json == null || json.isBlank()) {
             return null;
         }
         try {
             return objectMapper.readValue(json, type);
         } catch (Exception e) {
-            throw new IllegalStateException("Failed to parse stored snapshot for case", e);
+            log.error("Failed to parse stored {} snapshot", type.getSimpleName(), e);
+            if (warnings != null) {
+                warnings.add("Failed to parse " + type.getSimpleName() + " snapshot");
+            }
+            return null;
         }
     }
 }
