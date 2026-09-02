@@ -20,7 +20,7 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  listAlerts: () => request('/alerts'),
+  listAlerts: (page = 0, size = 20) => request(`/alerts?page=${page}&size=${size}`),
   investigateAlert: (alertId) => request(`/alerts/${alertId}/investigate`, { method: 'POST' }),
 
   listCases: () => request('/cases'),

@@ -9,6 +9,9 @@ backend/cbu-server
 # --- LLM cache (офлайн-демо, не должен коммититься) ---
 backend/llm-cache/
 
+# --- dev.sh backend log ---
+/logs/
+
 # --- Node / React / Vite ---
 frontend/node_modules/
 frontend/dist/
