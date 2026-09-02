@@ -76,6 +76,16 @@ public class LlmService {
         if (properties.cacheEnabled()) {
             var cached = cache.get(provider, model, Prompts.SYSTEM_PROMPT, userPrompt);
             if (cached.isPresent()) {
+                // Попадание в кэш — это тоже "вызов LLM" с точки зрения
+                // аудита: без этой записи первый llm_called кейса при
+                // повторном /investigate не находится (см.
+                // AuditLogRepository.findFirstByCaseEntityIdAndEventTypeOrderByIdAsc
+                // и CaseBuilderService.tryRestoreExistingCase), и
+                // humanExplanation молча возвращается пустым. Провайдер
+                // помечается суффиксом, чтобы в audit_log было видно, что
+                // ответ пришёл из файлового кэша, а не от реального вызова.
+                audit.logLlm(caseEntity, provider + " (cached)", model,
+                        Prompts.SYSTEM_PROMPT + "\n\n" + userPrompt, cached.get());
                 return cached.get();
             }
         }

@@ -3,6 +3,7 @@ package uz.caseintel.api;
 import uz.caseintel.casebuilder.CaseBuilderService;
 import uz.caseintel.casebuilder.dto.ReadyCaseDto;
 import uz.caseintel.repository.AlertRepository;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -52,9 +53,22 @@ public class AlertController {
      * Запускает Case Builder для алерта -> возвращает готовый кейс.
      * Перевод алерта в investigating происходит внутри buildCase, в одной
      * транзакции с созданием кейса.
+     *
+     * Конкурентные вызовы для одного alertId: cases.alert_id уникален на
+     * уровне БД, так что при гонке один из двух параллельных buildCase()
+     * падает с DataIntegrityViolationException при вставке Case (см.
+     * javadoc CaseBuilderService.buildCase). Ретраить это нужно именно
+     * здесь, а не внутри сервиса — вызов через caseBuilderService (Spring
+     * proxy) начинает НОВУЮ транзакцию, в которой findByAlertId уже видит
+     * кейс победителя (его транзакция к этому моменту гарантированно
+     * закоммичена — иначе наш INSERT не получил бы ошибку уникальности).
      */
     @PostMapping("/{id}/investigate")
     public ReadyCaseDto investigate(@PathVariable Long id) {
-        return caseBuilderService.buildCase(id);
+        try {
+            return caseBuilderService.buildCase(id);
+        } catch (DataIntegrityViolationException e) {
+            return caseBuilderService.buildCase(id);
+        }
     }
 }

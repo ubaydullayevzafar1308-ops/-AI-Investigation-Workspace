@@ -17,6 +17,9 @@ npm-debug.log*
 # --- LLM cache (офлайн-демо, не должен коммититься) ---
 backend/llm-cache/
 
+# --- dev.sh backend log ---
+/logs/
+
 # --- OS junk ---
 .DS_Store
 __MACOSX/

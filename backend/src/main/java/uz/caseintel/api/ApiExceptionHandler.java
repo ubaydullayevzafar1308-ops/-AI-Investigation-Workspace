@@ -1,6 +1,8 @@
 package uz.caseintel.api;
 
 import java.time.OffsetDateTime;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
@@ -16,6 +18,8 @@ import org.springframework.web.server.ResponseStatusException;
  */
 @RestControllerAdvice
 public class ApiExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
 
     public record ErrorResponse(OffsetDateTime timestamp, int status, String message) {}
 
@@ -35,10 +39,19 @@ public class ApiExceptionHandler {
         return build(HttpStatus.BAD_REQUEST, ex.getMessage());
     }
 
-    /** Всё остальное — 500, но в том же формате, что и явные ошибки. */
+    /**
+     * Всё остальное — 500, в том же формате, что и явные ошибки, но:
+     * (а) полный stack trace обязательно логируется — иначе неожиданный
+     *     500 в проде не оставляет никакого следа для отладки;
+     * (б) наружу клиенту уходит фиксированный текст, а не ex.getMessage()
+     *     — сообщение необработанного исключения (NPE, ошибка JDBC и
+     *     т.п.) может содержать детали реализации/схемы БД, которые не
+     *     должны утекать через API.
+     */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception ex) {
-        return build(HttpStatus.INTERNAL_SERVER_ERROR, ex.getMessage());
+        log.error("Unhandled exception while processing API request", ex);
+        return build(HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error");
     }
 
     private ResponseEntity<ErrorResponse> build(HttpStatusCode status, String message) {
