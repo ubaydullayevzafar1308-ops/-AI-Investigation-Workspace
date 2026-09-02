@@ -1,9 +1,10 @@
 // Command seed — генератор синтетических данных (ARCHITECTURE.md §16).
 //
-// PHASE 2: полный порт из uz.caseintel.seed.* (фон ~5000 клиентов /
-// ~500 компаний / ~100k транзакций + 6 срежиссированных схем + golden
-// case) ещё не выполнен. Сейчас — заглушка, которая только применяет
-// миграции и сообщает об этом.
+// Запуск ТОЛЬКО на пустой базе (свежие миграции без данных):
+//
+//	DATABASE_URL=... go run ./cmd/seed
+//
+// Повторный запуск на непустой базе даст конфликты id — пересоздайте БД.
 package main
 
 import (
@@ -12,16 +13,20 @@ import (
 
 	"github.com/tiredjon/cbu/backend/internal/config"
 	"github.com/tiredjon/cbu/backend/internal/db"
+	"github.com/tiredjon/cbu/backend/internal/seed"
 )
 
 func main() {
 	cfg := config.Load()
-	pool, err := db.Connect(context.Background(), cfg.DatabaseURL)
+
+	ctx := context.Background()
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
 	}
 	defer pool.Close()
 
-	log.Println("migrations applied.")
-	log.Println("seed generator port pending (Phase 2) — см. cmd/seed/main.go")
+	if err := seed.Run(ctx, pool, cfg.Seed); err != nil {
+		log.Fatalf("seed: %v", err)
+	}
 }

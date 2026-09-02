@@ -6,7 +6,7 @@
 
 - `backend/` — **Go 1.26** (chi + pgx + встроенный мигратор). Порт с Java/Spring.
 - `frontend/` — React 18 + Vite + Tailwind CSS
-- `seed/` — генератор синтетических данных (порт в `backend/cmd/seed` — **Phase 2**, пока заглушка)
+- `seed/` — генератор синтетических данных (порт в `backend/cmd/seed`)
 - `ARCHITECTURE.md` — полная техническая спецификация
 - `AI_LAYER_ARCHITECTURE.md` — спецификация LLM-слоя
 
@@ -15,7 +15,7 @@
 ```
 backend/
 ├── cmd/server/       — HTTP API
-├── cmd/seed/         — генератор данных (Phase 2)
+├── cmd/seed/         — генератор синтетических данных
 └── internal/
     ├── config/       — конфиг из ENV
     ├── db/           — pgxpool + миграции (embed .sql, свой мигратор)
@@ -42,6 +42,10 @@ backend/
   встроенный мигратор (таблица `schema_migrations`), отдельный CLI не нужен.
 - **Транзакции** — `casebuilder.BuildCase` и `PATCH /decision` выполняются в одной
   `pgx.Tx`; read-only шаги движков работают на пуле.
+- **Swagger** — вместо springdoc: рукописный `openapi.json` (embed) + Swagger UI
+  из CDN на `/swagger-ui.html`. Сам спец доступен офлайн на `/api/openapi.json`.
+- **seed** — `cmd/seed` вместо Spring-профиля `seed`; фон грузится через
+  `pgx.CopyFrom`, схемы — обычными INSERT, sequences сдвигаются в конце.
 
 ## Запуск
 
@@ -62,6 +66,7 @@ DATABASE_URL="postgres://app:app_secret@localhost:5432/case_intelligence?sslmode
 Миграции накатываются автоматически при старте.
 
 Проверка: `curl http://localhost:8080/api/health` → `{"status":"ok"}`
+Swagger UI: http://localhost:8080/swagger-ui.html (спец — `/api/openapi.json`)
 
 Переменные окружения:
 
@@ -75,6 +80,25 @@ DATABASE_URL="postgres://app:app_secret@localhost:5432/case_intelligence?sslmode
 | `LLM_BASE_URL` | — | для `local` (напр. `http://localhost:11434/v1`) |
 | `LLM_API_KEY` | — | ключ провайдера |
 | `LLM_CACHE_ENABLED` | `true` | файловый кэш ответов (`./llm-cache`) |
+
+### 2.5. Заполнить базу синтетическими данными (перед демо, только на пустой БД)
+
+```bash
+cd backend
+DATABASE_URL="postgres://app:app_secret@localhost:5432/case_intelligence?sslmode=disable" \
+  go run ./cmd/seed
+```
+
+~5000 клиентов / ~500 компаний / ~100k транзакций + 6 схем + golden case
+(регулируется `SEED_CLIENT_COUNT`, `SEED_COMPANY_COUNT`, `SEED_BACKGROUND_TX_COUNT`,
+`SEED_RANDOM_SEED`). В конце в логах — id алертов, в т.ч. `GOLDEN_CASE`:
+
+```bash
+curl -X POST http://localhost:8080/api/alerts/<GOLDEN_CASE_ID>/investigate
+```
+
+Повторный запуск на непустой базе даст конфликты id — пересоздайте БД
+(`docker compose down -v && docker compose up -d db`).
 
 ### 3. Frontend
 

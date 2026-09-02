@@ -57,8 +57,11 @@ func (h *Handler) Router(corsOrigin string) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(corsOrigin))
 
+	r.Get("/swagger-ui.html", handle(h.swaggerUI))
+
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", handle(h.health))
+		r.Get("/openapi.json", handle(h.openAPIJSON))
 
 		r.Get("/alerts", handle(h.listAlerts))
 		r.Post("/alerts/{id}/investigate", handle(h.investigate))
