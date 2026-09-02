@@ -1,0 +1,107 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AI Case Intelligence Platform API",
+    "version": "1.0.0",
+    "description": "Автоматическое превращение банковского Alert в готовое AML-расследование (Case) с объяснимым Risk Score. См. ARCHITECTURE.md §14."
+  },
+  "servers": [{ "url": "/", "description": "current host" }],
+  "tags": [
+    { "name": "alerts" }, { "name": "cases" }, { "name": "ai" },
+    { "name": "audit" }, { "name": "platform" }, { "name": "ops" }
+  ],
+  "paths": {
+    "/api/health": {
+      "get": { "tags": ["ops"], "summary": "Health-check",
+        "responses": { "200": { "description": "{\"status\":\"ok\"}" } } }
+    },
+    "/api/alerts": {
+      "get": { "tags": ["alerts"], "summary": "Список алертов (фильтры status/severity, пагинация)",
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "severity", "in": "query", "schema": { "type": "string", "enum": ["low","medium","high"] } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 0 } },
+          { "name": "size", "in": "query", "schema": { "type": "integer", "default": 20 } }
+        ],
+        "responses": { "200": { "description": "Page<AlertSummary>" } } }
+    },
+    "/api/alerts/{id}/investigate": {
+      "post": { "tags": ["alerts"], "summary": "Запустить Case Builder → готовый кейс (идемпотентно)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "ReadyCase" }, "400": { "description": "ошибка" } } }
+    },
+    "/api/cases": {
+      "get": { "tags": ["cases"], "summary": "Список кейсов (пагинация)",
+        "parameters": [
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 0 } },
+          { "name": "size", "in": "query", "schema": { "type": "integer", "default": 20 } }
+        ],
+        "responses": { "200": { "description": "Page<CaseSummary>" } } }
+    },
+    "/api/cases/{id}": {
+      "get": { "tags": ["cases"], "summary": "Полное досье кейса (dossier + evidence + explanation)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "CaseDetail" }, "404": { "description": "не найден" } } }
+    },
+    "/api/cases/{id}/evidence": {
+      "get": { "tags": ["cases"], "summary": "Пакет доказательств",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "EvidenceBundle" } } }
+    },
+    "/api/cases/{id}/explanation": {
+      "get": { "tags": ["cases"], "summary": "Объяснение Risk Score (причина → вклад)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Explanation" } } }
+    },
+    "/api/cases/{id}/graph": {
+      "get": { "tags": ["cases"], "summary": "Подграф связей (nodes + edges) для визуализации",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Graph" } } }
+    },
+    "/api/cases/{id}/report": {
+      "get": { "tags": ["cases"], "summary": "Черновик отчёта",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Report" }, "404": { "description": "нет отчёта" } } },
+      "put": { "tags": ["cases"], "summary": "Правки аналитика поверх черновика",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": {
+          "type": "object", "properties": { "finalText": { "type": "string" }, "approvedBy": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "Report" } } }
+    },
+    "/api/cases/{id}/decision": {
+      "patch": { "tags": ["cases"], "summary": "Решение аналитика (approved|rejected|escalated) → Audit Log",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": {
+          "type": "object", "properties": { "status": { "type": "string" }, "comment": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "CaseSummary" } } }
+    },
+    "/api/cases/{id}/chat": {
+      "post": { "tags": ["ai"], "summary": "Вопрос аналитика по фактам кейса (ответ строго по Safe JSON)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": {
+          "type": "object", "properties": { "question": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "{\"answer\": \"...\"}" }, "409": { "description": "кейс не собран" } } }
+    },
+    "/api/cases/{id}/audit": {
+      "get": { "tags": ["audit"], "summary": "История расследования (prompt/response обрезаны до 200 символов)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "AuditLogSummary[]" } } }
+    },
+    "/api/cases/{id}/audit/{eventId}": {
+      "get": { "tags": ["audit"], "summary": "Одна полная запись audit_log без обрезки",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } },
+          { "name": "eventId", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "AuditLogDetail" }, "404": { "description": "не найдена" } } }
+    },
+    "/api/modules": {
+      "get": { "tags": ["platform"], "summary": "Модули платформы (AML активен, остальные за feature flags)",
+        "responses": { "200": { "description": "FeatureFlag[]" } } }
+    },
+    "/api/dashboard/metrics": {
+      "get": { "tags": ["platform"], "summary": "Метрики дашборда (кейсов всего/сегодня, avg score, распределение правил)",
+        "responses": { "200": { "description": "DashboardMetrics" } } }
+    }
+  }
+}

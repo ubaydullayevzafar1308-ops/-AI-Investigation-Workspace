@@ -11,10 +11,10 @@ services:
   backend:
     build: ./backend
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/case_intelligence
-      SPRING_DATASOURCE_USERNAME: app
-      SPRING_DATASOURCE_PASSWORD: app_secret
-      LLM_PROVIDER: ${LLM_PROVIDER:-claude}
+      DATABASE_URL: postgres://app:app_secret@db:5432/case_intelligence?sslmode=disable
+      PORT: "8080"
+      CORS_ORIGIN: http://localhost:5173
+      LLM_PROVIDER: ${LLM_PROVIDER:-stub}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_CACHE_ENABLED: "true"
     depends_on: [db]
