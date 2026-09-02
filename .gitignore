@@ -1,12 +1,13 @@
-# --- Java / Maven / Spring Boot ---
-backend/target/
-backend/.mvn/wrapper/maven-wrapper.jar
-*.class
-*.jar
-!.mvn/wrapper/*.properties
-.idea/
-*.iml
-HELP.md
+# --- Go / backend ---
+backend/server
+backend/seed
+backend/cbu-server
+/backend/bin/
+*.test
+*.out
+
+# --- LLM cache (офлайн-демо, не должен коммититься) ---
+backend/llm-cache/
 
 # --- Node / React / Vite ---
 frontend/node_modules/
@@ -14,10 +15,9 @@ frontend/dist/
 frontend/.vite/
 npm-debug.log*
 
-# --- LLM cache (офлайн-демо, не должен коммититься) ---
-backend/llm-cache/
-
-# --- OS junk ---
+# --- IDE / OS junk ---
+.idea/
+*.iml
 .DS_Store
 __MACOSX/
 

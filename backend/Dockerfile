@@ -1,12 +1,14 @@
-FROM maven:3.9-eclipse-temurin-21 AS build
+FROM golang:1.26 AS build
 WORKDIR /app
-COPY pom.xml .
-RUN mvn -q dependency:go-offline
-COPY src ./src
-RUN mvn -q -DskipTests package
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/server ./cmd/server
+RUN CGO_ENABLED=0 go build -o /out/seed ./cmd/seed
 
-FROM eclipse-temurin:21-jre
+FROM gcr.io/distroless/static-debian12
 WORKDIR /app
-COPY --from=build /app/target/*.jar app.jar
+COPY --from=build /out/server /app/server
+COPY --from=build /out/seed /app/seed
 EXPOSE 8080
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENTRYPOINT ["/app/server"]

@@ -4,13 +4,44 @@
 
 ## Структура
 
-- `backend/` — Java 21 + Spring Boot 3.3 (Maven)
+- `backend/` — **Go 1.26** (chi + pgx + встроенный мигратор). Порт с Java/Spring.
 - `frontend/` — React 18 + Vite + Tailwind CSS
-- `seed/` — генератор синтетических данных теперь живёт в
-  `backend/src/main/java/uz/caseintel/seed/` (Java CommandLineRunner,
-  профиль `seed`); эта папка оставлена для совместимости со структурой
-  из ARCHITECTURE.md §16, реальный код — в backend.
+- `seed/` — генератор синтетических данных (порт в `backend/cmd/seed` — **Phase 2**, пока заглушка)
 - `ARCHITECTURE.md` — полная техническая спецификация
+- `AI_LAYER_ARCHITECTURE.md` — спецификация LLM-слоя
+
+## Backend (Go)
+
+```
+backend/
+├── cmd/server/       — HTTP API
+├── cmd/seed/         — генератор данных (Phase 2)
+└── internal/
+    ├── config/       — конфиг из ENV
+    ├── db/           — pgxpool + миграции (embed .sql, свой мигратор)
+    ├── domain/       — доменные структуры + DTO пайплайна
+    ├── repo/         — слой доступа к данным (pgx, заменяет Spring Data JPA)
+    ├── datacollector/— ① сбор досье
+    ├── rules/        — ② Rule Engine (10 правил R01..R10)
+    ├── graph/        — ③ Graph Engine + CycleDetector
+    ├── evidence/     — ④ Evidence Collector
+    ├── risk/         — ⑤ Risk Engine
+    ├── explain/      — ⑥ Explainability Engine
+    ├── llm/          — ⑦⑧ Safe JSON + AI Adapter (claude/openai/gemini/local/stub) + кэш
+    ├── report/       — ⑨ Report Generator
+    ├── audit/        — Audit Log
+    ├── casebuilder/  — ⭐ оркестратор пайплайна
+    └── api/          — REST-контроллеры (chi)
+```
+
+### Отклонения от Spring-версии
+
+- **sqlc не используется** — вместо него pgx с рукописными запросами: рекурсивные
+  CTE Graph Engine и динамический VALUES-список подграфа всё равно не выразить в sqlc.
+- **Миграции** — те же 4 .sql-файла (перенос Flyway V1..V4), применяет минимальный
+  встроенный мигратор (таблица `schema_migrations`), отдельный CLI не нужен.
+- **Транзакции** — `casebuilder.BuildCase` и `PATCH /decision` выполняются в одной
+  `pgx.Tx`; read-only шаги движков работают на пуле.
 
 ## Запуск
 
@@ -24,44 +55,32 @@ docker compose up -d db
 
 ```bash
 cd backend
-./mvnw spring-boot:run
+DATABASE_URL="postgres://app:app_secret@localhost:5432/case_intelligence?sslmode=disable" \
+  go run ./cmd/server
 ```
+
+Миграции накатываются автоматически при старте.
 
 Проверка: `curl http://localhost:8080/api/health` → `{"status":"ok"}`
-Swagger UI: http://localhost:8080/swagger-ui.html
 
-### 2.5. Заполнить базу синтетическими данными (обязательно перед демо)
+Переменные окружения:
 
-**Только на пустой базе** (сразу после миграций Flyway, без данных):
-
-```bash
-cd backend
-./mvnw spring-boot:run -Dspring-boot.run.profiles=seed
-```
-
-Займёт какое-то время из-за ~100 000 фоновых транзакций (batch insert).
-В конце в логах будет строка вида:
-
-```
-Alert id для демо: structuring=..., circular=..., transit=..., newCompanySpike=..., fanInOut=..., GOLDEN_CASE=...
-```
-
-`GOLDEN_CASE` — id алерта главного демо-кейса. Прогони его через пайплайн:
-
-```bash
-curl -X POST http://localhost:8080/api/alerts/<GOLDEN_CASE_ID>/investigate
-```
-
-Повторный запуск seed на непустой базе приведёт к конфликтам id — либо
-`docker compose down -v && docker compose up -d db` (пересоздать БД),
-либо вручную `TRUNCATE` всех таблиц перед повторным сидированием.
+| ENV | По умолчанию | Назначение |
+|---|---|---|
+| `DATABASE_URL` | из `SPRING_DATASOURCE_*` или `postgres://app:app_secret@localhost:5432/case_intelligence` | DSN pgx |
+| `PORT` | `8080` | HTTP-порт |
+| `CORS_ORIGIN` | `http://localhost:5173` | origin фронтенда |
+| `LLM_PROVIDER` | `stub` | `claude` \| `openai` \| `gemini` \| `local` \| `stub` |
+| `LLM_MODEL` | `template-v1.0` | модель |
+| `LLM_BASE_URL` | — | для `local` (напр. `http://localhost:11434/v1`) |
+| `LLM_API_KEY` | — | ключ провайдера |
+| `LLM_CACHE_ENABLED` | `true` | файловый кэш ответов (`./llm-cache`) |
 
 ### 3. Frontend
 
 ```bash
 cd frontend
-npm install
-npm run dev
+npm install && npm run dev
 ```
 
 Откроется на http://localhost:5173 (запросы `/api/*` проксируются на backend).
@@ -72,8 +91,18 @@ npm run dev
 docker compose up --build
 ```
 
+## Тесты
+
+```bash
+cd backend && go test ./...
+```
+
+Покрыты: CycleDetector, ключевые правила (R01/R03/R07/R10), полный чистый пайплайн
+(rules → evidence → risk → explain) и инвариант безопасности Safe JSON
+(реальные ФИО/названия компаний не попадают в то, что уходит в LLM).
+
 ## Требования
 
+- Go 1.26 (для локального запуска backend)
 - Docker + Docker Compose
-- Java 21 (для локального запуска backend)
 - Node.js 20+ (для локального запуска frontend)
